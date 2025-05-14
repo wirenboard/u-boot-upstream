@@ -7,7 +7,7 @@
 		- [Подготовка ATF (Arm Trusted Firmware)](#подготовка-atf-arm-trusted-firmware)
 			- [Заимствование BL31 из собранного deb-пакета ATF](#заимствование-bl31-из-собранного-deb-пакета-atf)
 			- [Самостоятельная сборка ATF](#самостоятельная-сборка-atf)
-		- [Установка cross-toolchain](#установка-cross-toolchain)
+		- [Установка зависимостей для сборки](#установка-зависимостей-для-сборки)
 		- [Получение исходных кодов](#получение-исходных-кодов)
 	- [Сборка u-boot](#сборка-u-boot)
 	- [Установка u-boot](#установка-u-boot)
@@ -103,11 +103,11 @@ graph TB
 - `make PLAT=sun50i_a64 DEBUG=0 bl31`
 - `cp build/sun50i_a64/release/bl31.bin ~/bl31.bin`
 
-### Установка cross-toolchain
+### Установка зависимостей для сборки
 Рекомендуется использовать cross-toolchain для системы ARM64, поставляемый с операционной системой.
 
 Для ОС Ubuntu выполните (если не делали это ранее):
-`sudo apt install git gcc-aarch64-linux-gnu` 
+`sudo apt install git gcc-aarch64-linux-gnu bc build-essential git libncurses5-dev lzop perl libssl-dev bison flex swig libyaml-dev pkg-config python3-dev libgnutls28-dev`
 
 
 ### Получение исходных кодов
