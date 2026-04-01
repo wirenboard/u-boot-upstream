@@ -13,7 +13,7 @@
 
 bool mctl_core_init(const struct dram_para *para,
 		    const struct dram_config *config);
-void mctl_auto_detect_rank_width(const struct dram_para *para,
+bool mctl_auto_detect_rank_width(const struct dram_para *para,
 				 struct dram_config *config);
 void mctl_auto_detect_dram_size(const struct dram_para *para,
 				struct dram_config *config);

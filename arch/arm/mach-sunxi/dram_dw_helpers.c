@@ -9,7 +9,7 @@
 #include <init.h>
 #include <asm/arch/dram_dw_helpers.h>
 
-void mctl_auto_detect_rank_width(const struct dram_para *para,
+bool mctl_auto_detect_rank_width(const struct dram_para *para,
 				 struct dram_config *config)
 {
 	/* this is minimum size that it's supported */
@@ -28,27 +28,27 @@ void mctl_auto_detect_rank_width(const struct dram_para *para,
 	config->bus_full_width = 1;
 	config->ranks = 2;
 	if (mctl_core_init(para, config))
-		return;
+		return true;
 
 	debug("testing 32-bit width, rank = 1\n");
 	config->bus_full_width = 1;
 	config->ranks = 1;
 	if (mctl_core_init(para, config))
-		return;
+		return true;
 
 	debug("testing 16-bit width, rank = 2\n");
 	config->bus_full_width = 0;
 	config->ranks = 2;
 	if (mctl_core_init(para, config))
-		return;
+		return true;
 
 	debug("testing 16-bit width, rank = 1\n");
 	config->bus_full_width = 0;
 	config->ranks = 1;
 	if (mctl_core_init(para, config))
-		return;
+		return true;
 
-	panic("This DRAM setup is currently not supported.\n");
+	return false;
 }
 
 static void mctl_write_pattern(void)

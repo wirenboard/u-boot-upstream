@@ -30,6 +30,14 @@ enum {
 	MBUS_QOS_HIGHEST
 };
 
+struct dram_runtime_profile {
+	const char *name;
+	struct dram_para para;
+};
+
+void mctl_set_timing_params_ddr3_runtime(const struct dram_para *para);
+void mctl_set_timing_params_lpddr4_runtime(const struct dram_para *para);
+
 static void mbus_configure_port(u8 port,
 				bool bwlimit,
 				bool priority,
@@ -228,30 +236,51 @@ static void mctl_set_addrmap(const struct dram_config *config)
 	mctl_ctl->addrmap[8] = 0x3F3F;
 }
 
-static const u8 phy_init[] = {
-#ifdef CONFIG_SUNXI_DRAM_H616_DDR3_1333
-	0x07, 0x0b, 0x02, 0x16, 0x0d, 0x0e, 0x14, 0x19,
-	0x0a, 0x15, 0x03, 0x13, 0x04, 0x0c, 0x10, 0x06,
-	0x0f, 0x11, 0x1a, 0x01, 0x12, 0x17, 0x00, 0x08,
-	0x09, 0x05, 0x18
-#elif defined(CONFIG_SUNXI_DRAM_H616_LPDDR3)
-	0x18, 0x06, 0x00, 0x05, 0x04, 0x03, 0x09, 0x02,
-	0x08, 0x01, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
-	0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x07,
-	0x17, 0x19, 0x1a
-#elif defined(CONFIG_SUNXI_DRAM_H616_LPDDR4)
-	0x02, 0x00, 0x17, 0x05, 0x04, 0x19, 0x06, 0x07,
-	0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
-	0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x01,
-	0x18, 0x03, 0x1a
-#elif defined(CONFIG_SUNXI_DRAM_T507_LPDDR4)
+static const u8 phy_init_map1_ddr3[] = {
+	0x08, 0x02, 0x12, 0x05, 0x15, 0x17, 0x18, 0x0b,
+	0x14, 0x07, 0x04, 0x13, 0x0c, 0x00, 0x16, 0x1a,
+	0x0a, 0x11, 0x03, 0x10, 0x0e, 0x01, 0x0d, 0x19,
+	0x06, 0x09, 0x0f
+};
+
+static const u8 phy_init_map0_t507_lpddr4[] = {
 	0x03, 0x00, 0x17, 0x05, 0x02, 0x19, 0x06, 0x07,
 	0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
 	0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x01,
 	0x18, 0x04, 0x1a
-#endif
 };
 
+static const u8 *dram_phy_init_map(const struct dram_para *para, size_t *len)
+{
+	switch (para->type) {
+	case SUNXI_DRAM_TYPE_DDR3:
+		*len = ARRAY_SIZE(phy_init_map1_ddr3);
+		return phy_init_map1_ddr3;
+	case SUNXI_DRAM_TYPE_LPDDR4:
+		*len = ARRAY_SIZE(phy_init_map0_t507_lpddr4);
+		return phy_init_map0_t507_lpddr4;
+	case SUNXI_DRAM_TYPE_LPDDR3:
+	case SUNXI_DRAM_TYPE_DDR4:
+	default:
+		panic("This DRAM setup is currently not supported.\n");
+	}
+}
+
+static void dram_set_timing_params_runtime(const struct dram_para *para)
+{
+	switch (para->type) {
+	case SUNXI_DRAM_TYPE_DDR3:
+		mctl_set_timing_params_ddr3_runtime(para);
+		break;
+	case SUNXI_DRAM_TYPE_LPDDR4:
+		mctl_set_timing_params_lpddr4_runtime(para);
+		break;
+	case SUNXI_DRAM_TYPE_LPDDR3:
+	case SUNXI_DRAM_TYPE_DDR4:
+	default:
+		panic("This DRAM setup is currently not supported.\n");
+	}
+}
 #define MASK_BYTE(reg, nr) (((reg) >> ((nr) * 8)) & 0x1f)
 static void mctl_phy_configure_odt(const struct dram_para *para)
 {
@@ -894,6 +923,8 @@ static bool mctl_phy_init(const struct dram_para *para,
 	struct sunxi_mctl_ctl_reg * const mctl_ctl =
 			(struct sunxi_mctl_ctl_reg *)SUNXI_DRAM_CTL0_BASE;
 	u32 val, val2, *ptr, mr0, mr2;
+	const u8 *phy_init;
+	size_t phy_init_len;
 	int i;
 
 	if (para->type == SUNXI_DRAM_TYPE_LPDDR4)
@@ -948,8 +979,9 @@ static bool mctl_phy_init(const struct dram_para *para,
 	writel(val2, SUNXI_DRAM_PHY0_BASE + 0x370);
 	writel(val2, SUNXI_DRAM_PHY0_BASE + 0x37c);
 
+	phy_init = dram_phy_init_map(para, &phy_init_len);
 	ptr = (u32 *)(SUNXI_DRAM_PHY0_BASE + 0xc0);
-	for (i = 0; i < ARRAY_SIZE(phy_init); i++)
+	for (i = 0; i < phy_init_len; i++)
 		writel(phy_init[i], &ptr[i]);
 
 	if (para->tpr10 & TPR10_CA_BIT_DELAY)
@@ -1264,7 +1296,7 @@ static bool mctl_ctrl_init(const struct dram_para *para,
 
 	mctl_set_addrmap(config);
 
-	mctl_set_timing_params(para);
+	dram_set_timing_params_runtime(para);
 
 	writel(0, &mctl_ctl->pwrctl);
 
@@ -1315,28 +1347,73 @@ bool mctl_core_init(const struct dram_para *para,
 	return mctl_ctrl_init(para, config);
 }
 
-static const struct dram_para para = {
-	.clk = CONFIG_DRAM_CLK,
-#ifdef CONFIG_SUNXI_DRAM_H616_DDR3_1333
-	.type = SUNXI_DRAM_TYPE_DDR3,
-#elif defined(CONFIG_SUNXI_DRAM_H616_LPDDR3)
-	.type = SUNXI_DRAM_TYPE_LPDDR3,
-#elif defined(CONFIG_SUNXI_DRAM_H616_LPDDR4)
-	.type = SUNXI_DRAM_TYPE_LPDDR4,
-#elif defined(CONFIG_SUNXI_DRAM_T507_LPDDR4)
-	.type = SUNXI_DRAM_TYPE_LPDDR4,
-#endif
-	.dx_odt = CONFIG_DRAM_SUN50I_H616_DX_ODT,
-	.dx_dri = CONFIG_DRAM_SUN50I_H616_DX_DRI,
-	.ca_dri = CONFIG_DRAM_SUN50I_H616_CA_DRI,
-	.odt_en = CONFIG_DRAM_SUN50I_H616_ODT_EN,
-	.tpr0 = CONFIG_DRAM_SUN50I_H616_TPR0,
-	.tpr2 = CONFIG_DRAM_SUN50I_H616_TPR2,
-	.tpr6 = CONFIG_DRAM_SUN50I_H616_TPR6,
-	.tpr10 = CONFIG_DRAM_SUN50I_H616_TPR10,
-	.tpr11 = CONFIG_DRAM_SUN50I_H616_TPR11,
-	.tpr12 = CONFIG_DRAM_SUN50I_H616_TPR12,
+static const struct dram_runtime_profile profile_lpddr4 = {
+	.name = "LPDDR4",
+	.para = {
+		.clk = 792,
+		.type = SUNXI_DRAM_TYPE_LPDDR4,
+		.dx_odt = 0x07070707,
+		.dx_dri = 0x0e0e0e0e,
+		.ca_dri = 0x0e0e,
+		.odt_en = 0xaaaaeeee,
+		.tpr0 = 0x0,
+		.tpr2 = 0x0,
+		.tpr6 = 0x44000000,
+		.tpr10 = 0x402f6633,
+		.tpr11 = 0x24242624,
+		.tpr12 = 0x0f0f100f,
+	},
 };
+
+static const struct dram_runtime_profile profile_ddr3 = {
+	.name = "DDR3",
+	.para = {
+		.clk = 720,
+		.type = SUNXI_DRAM_TYPE_DDR3,
+		.dx_odt = 0x08080808,
+		.dx_dri = 0x0e0e0e0e,
+		.ca_dri = 0x0e0e,
+		.odt_en = 0x1,
+		.tpr0 = 0x0,
+		.tpr2 = 0x0,
+		.tpr6 = 0x3300c080,
+		.tpr10 = 0x00f83438,
+		.tpr11 = 0x0,
+		.tpr12 = 0x0,
+	},
+};
+
+static const char *dram_type_name(enum sunxi_dram_type type)
+{
+	switch (type) {
+	case SUNXI_DRAM_TYPE_DDR3:
+		return "DDR3";
+	case SUNXI_DRAM_TYPE_LPDDR3:
+		return "LPDDR3";
+	case SUNXI_DRAM_TYPE_LPDDR4:
+		return "LPDDR4";
+	case SUNXI_DRAM_TYPE_DDR4:
+		return "DDR4";
+	default:
+		return "unknown";
+	}
+}
+
+static bool try_dram_profile(const struct dram_runtime_profile *profile,
+			     struct dram_config *config, unsigned long *size)
+{
+	if (!mctl_auto_detect_rank_width(&profile->para, config))
+		return false;
+
+	mctl_auto_detect_dram_size(&profile->para, config);
+
+	if (!mctl_core_init(&profile->para, config))
+		return false;
+
+	*size = mctl_calc_size(config);
+
+	return *size != 0;
+}
 
 unsigned long sunxi_dram_init(void)
 {
@@ -1344,42 +1421,27 @@ unsigned long sunxi_dram_init(void)
 		(struct sunxi_prcm_reg *)SUNXI_PRCM_BASE;
 	struct dram_config config;
 	unsigned long size;
+	const struct dram_runtime_profile *profile = &profile_lpddr4;
 	const char *type;
 	unsigned int width;
 	unsigned int page_size;
 
-	switch (para.type) {
-	case SUNXI_DRAM_TYPE_DDR3:
-		type = "DDR3";
-		break;
-	case SUNXI_DRAM_TYPE_LPDDR3:
-		type = "LPDDR3";
-		break;
-	case SUNXI_DRAM_TYPE_LPDDR4:
-		type = "LPDDR4";
-		break;
-	case SUNXI_DRAM_TYPE_DDR4:
-		type = "DDR4";
-		break;
-	default:
-		type = "unknown";
-		break;
-	}
-
 	setbits_le32(&prcm->res_cal_ctrl, BIT(8));
 	clrbits_le32(&prcm->ohms240, 0x3f);
 
-	mctl_auto_detect_rank_width(&para, &config);
-	mctl_auto_detect_dram_size(&para, &config);
+	if (!try_dram_profile(profile, &config, &size)) {
+		profile = &profile_ddr3;
+		if (!try_dram_profile(profile, &config, &size))
+			panic("This DRAM setup is currently not supported.\n");
+	}
 
-	mctl_core_init(&para, &config);
-
-	size = mctl_calc_size(&config);
+	type = dram_type_name(profile->para.type);
 	width = config.bus_full_width ? 32 : 16;
 	page_size = (1U << config.cols) * (width / 8);
 
 	printf("DRAM topo: type=%s clk=%uMHz rank=%u width=%u rows=%u cols=%u banks=8 page=%uB size=%luMiB\n",
-	       type, para.clk, config.ranks, width, config.rows, config.cols,
+	       type, profile->para.clk, config.ranks, width, config.rows,
+	       config.cols,
 	       page_size, size >> 20);
 
 	mctl_set_master_priority();
