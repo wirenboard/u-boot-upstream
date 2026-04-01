@@ -1,0 +1,2 @@
+#define mctl_set_timing_params mctl_set_timing_params_lpddr4_runtime
+#include "h616_lpddr4_2133.c"
