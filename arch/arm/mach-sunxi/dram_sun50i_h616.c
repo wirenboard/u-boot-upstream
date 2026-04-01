@@ -1344,6 +1344,27 @@ unsigned long sunxi_dram_init(void)
 		(struct sunxi_prcm_reg *)SUNXI_PRCM_BASE;
 	struct dram_config config;
 	unsigned long size;
+	const char *type;
+	unsigned int width;
+	unsigned int page_size;
+
+	switch (para.type) {
+	case SUNXI_DRAM_TYPE_DDR3:
+		type = "DDR3";
+		break;
+	case SUNXI_DRAM_TYPE_LPDDR3:
+		type = "LPDDR3";
+		break;
+	case SUNXI_DRAM_TYPE_LPDDR4:
+		type = "LPDDR4";
+		break;
+	case SUNXI_DRAM_TYPE_DDR4:
+		type = "DDR4";
+		break;
+	default:
+		type = "unknown";
+		break;
+	}
 
 	setbits_le32(&prcm->res_cal_ctrl, BIT(8));
 	clrbits_le32(&prcm->ohms240, 0x3f);
@@ -1354,6 +1375,12 @@ unsigned long sunxi_dram_init(void)
 	mctl_core_init(&para, &config);
 
 	size = mctl_calc_size(&config);
+	width = config.bus_full_width ? 32 : 16;
+	page_size = (1U << config.cols) * (width / 8);
+
+	printf("DRAM topo: type=%s clk=%uMHz rank=%u width=%u rows=%u cols=%u banks=8 page=%uB size=%luMiB\n",
+	       type, para.clk, config.ranks, width, config.rows, config.cols,
+	       page_size, size >> 20);
 
 	mctl_set_master_priority();
 
