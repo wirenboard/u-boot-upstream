@@ -115,7 +115,8 @@ static void mctl_sys_init(u32 clk_rate)
 	/* Set PLL5 rate to doubled DRAM clock rate */
 	writel(CCM_PLL5_CTRL_EN | CCM_PLL5_LOCK_EN | CCM_PLL5_OUT_EN |
 	       CCM_PLL5_CTRL_N(clk_rate * 2 / 24), &ccm->pll5_cfg);
-	mctl_await_completion(&ccm->pll5_cfg, CCM_PLL5_LOCK, CCM_PLL5_LOCK);
+	mctl_await_completion(&ccm->pll5_cfg,
+			      CCM_PLL5_LOCK, CCM_PLL5_LOCK);
 
 	/* Configure DRAM mod clock */
 	writel(DRAM_CLK_SRC_PLL5, &ccm->dram_clk_cfg);
@@ -244,14 +245,10 @@ static const u8 phy_init[] = {
 	0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x01,
 	0x18, 0x03, 0x1a
 #elif defined(CONFIG_SUNXI_DRAM_T507_LPDDR4)
-	/* grabbed from https://patchwork.ozlabs.org/project/uboot/patch/20230729111331.173768-2-iuncuim@gmail.com/
-	 * which should be the same as in boot0 binary.
-	 * TODO: maybe stock one is better in some way?
-	 * */
 	0x03, 0x00, 0x17, 0x05, 0x02, 0x19, 0x06, 0x07,
-	0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F,
+	0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
 	0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x01,
-	0x18, 0x04, 0x1A
+	0x18, 0x04, 0x1a
 #endif
 };
 
@@ -1067,18 +1064,18 @@ static bool mctl_phy_init(const struct dram_para *para,
 		mctl_await_completion(&mctl_ctl->mrctrl0, BIT(31), 0);
 		break;
 	case SUNXI_DRAM_TYPE_LPDDR3:
-		writel(mr0, &mctl_ctl->mrctrl1);
+		/* MR0 is read-only */
+		/* MR1: nWR=14, BL8 */
+		writel(0x183, &mctl_ctl->mrctrl1);
 		writel(0x800000f0, &mctl_ctl->mrctrl0);
 		mctl_await_completion(&mctl_ctl->mrctrl0, BIT(31), 0);
 
-		writel(4, &mctl_ctl->mrctrl1);
+		/* MR2: no WR leveling, WL set A, use nWR>9, nRL=14/nWL=8 */
+		writel(0x21c, &mctl_ctl->mrctrl1);
 		writel(0x800000f0, &mctl_ctl->mrctrl0);
 		mctl_await_completion(&mctl_ctl->mrctrl0, BIT(31), 0);
 
-		writel(mr2, &mctl_ctl->mrctrl1);
-		writel(0x800000f0, &mctl_ctl->mrctrl0);
-		mctl_await_completion(&mctl_ctl->mrctrl0, BIT(31), 0);
-
+		/* MR3: 34.3 Ohm pull-up/pull-down resistor */
 		writel(0x301, &mctl_ctl->mrctrl1);
 		writel(0x800000f0, &mctl_ctl->mrctrl0);
 		mctl_await_completion(&mctl_ctl->mrctrl0, BIT(31), 0);
