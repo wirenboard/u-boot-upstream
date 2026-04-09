@@ -1402,13 +1402,21 @@ static const char *dram_type_name(enum sunxi_dram_type type)
 static bool try_dram_profile(const struct dram_runtime_profile *profile,
 			     struct dram_config *config, unsigned long *size)
 {
-	if (!mctl_auto_detect_rank_width(&profile->para, config))
+	const char *type = dram_type_name(profile->para.type);
+
+	printf("DRAM probe: trying %s @ %uMHz\n", type, profile->para.clk);
+
+	if (!mctl_auto_detect_rank_width(&profile->para, config)) {
+		printf("DRAM probe: %s rank/width detection failed\n", type);
 		return false;
+	}
 
 	mctl_auto_detect_dram_size(&profile->para, config);
 
-	if (!mctl_core_init(&profile->para, config))
+	if (!mctl_core_init(&profile->para, config)) {
+		printf("DRAM probe: %s initialization failed\n", type);
 		return false;
+	}
 
 	*size = mctl_calc_size(config);
 
