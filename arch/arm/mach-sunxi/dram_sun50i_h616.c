@@ -22,6 +22,7 @@
 #include <asm/arch/prcm.h>
 #include <linux/bitops.h>
 #include <linux/delay.h>
+#include <linux/errno.h>
 
 enum {
 	MBUS_QOS_LOWEST = 0,
@@ -1399,12 +1400,32 @@ static const char *dram_type_name(enum sunxi_dram_type type)
 	}
 }
 
+/*
+ * Some boards need to switch DRAM power rails before trying a profile.
+ * Keep it as a hook so this generic DRAM driver does not depend on PMIC code.
+ */
+__weak int sunxi_dram_prepare_type(enum sunxi_dram_type type)
+{
+	return 0;
+}
+
 static bool try_dram_profile(const struct dram_runtime_profile *profile,
 			     struct dram_config *config, unsigned long *size)
 {
 	const char *type = dram_type_name(profile->para.type);
+	int ret;
 
 	printf("DRAM probe: trying %s @ %uMHz\n", type, profile->para.clk);
+
+	ret = sunxi_dram_prepare_type(profile->para.type);
+	if (ret == -EOPNOTSUPP) {
+		printf("DRAM probe: skipping %s by board strap\n", type);
+		return false;
+	}
+	if (ret) {
+		printf("DRAM probe: failed to prepare %s power rails\n", type);
+		return false;
+	}
 
 	if (!mctl_auto_detect_rank_width(&profile->para, config)) {
 		printf("DRAM probe: %s rank/width detection failed\n", type);
