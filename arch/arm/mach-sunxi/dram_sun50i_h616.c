@@ -22,7 +22,6 @@
 #include <asm/arch/prcm.h>
 #include <linux/bitops.h>
 #include <linux/delay.h>
-#include <linux/errno.h>
 
 enum {
 	MBUS_QOS_LOWEST = 0,
@@ -1401,10 +1400,10 @@ static const char *dram_type_name(enum sunxi_dram_type type)
 }
 
 /*
- * Some boards need to switch DRAM power rails before trying a profile.
- * Keep it as a hook so this generic DRAM driver does not depend on PMIC code.
+ * Board code may select DRAM type and switch power rails before probing.
+ * Keep this hook generic so the H616 DRAM driver does not depend on PMIC code.
  */
-__weak int sunxi_dram_prepare_type(enum sunxi_dram_type type)
+__weak int sunxi_dram_prepare_type(enum sunxi_dram_type *type)
 {
 	return 0;
 }
@@ -1413,19 +1412,6 @@ static bool try_dram_profile(const struct dram_runtime_profile *profile,
 			     struct dram_config *config, unsigned long *size)
 {
 	const char *type = dram_type_name(profile->para.type);
-	int ret;
-
-	printf("DRAM probe: trying %s @ %uMHz\n", type, profile->para.clk);
-
-	ret = sunxi_dram_prepare_type(profile->para.type);
-	if (ret == -EOPNOTSUPP) {
-		printf("DRAM probe: skipping %s by board strap\n", type);
-		return false;
-	}
-	if (ret) {
-		printf("DRAM probe: failed to prepare %s power rails\n", type);
-		return false;
-	}
 
 	if (!mctl_auto_detect_rank_width(&profile->para, config)) {
 		printf("DRAM probe: %s rank/width detection failed\n", type);
@@ -1451,6 +1437,7 @@ unsigned long sunxi_dram_init(void)
 	struct dram_config config;
 	unsigned long size;
 	const struct dram_runtime_profile *profile = &profile_lpddr4;
+	enum sunxi_dram_type strap_type = 0;
 	const char *type;
 	unsigned int width;
 	unsigned int page_size;
@@ -1458,7 +1445,18 @@ unsigned long sunxi_dram_init(void)
 	setbits_le32(&prcm->res_cal_ctrl, BIT(8));
 	clrbits_le32(&prcm->ohms240, 0x3f);
 
-	if (!try_dram_profile(profile, &config, &size)) {
+	if (sunxi_dram_prepare_type(&strap_type))
+		panic("Failed to prepare DRAM power rails.\n");
+
+	if (strap_type == SUNXI_DRAM_TYPE_DDR3) {
+		profile = &profile_ddr3;
+		if (!try_dram_profile(profile, &config, &size))
+			panic("This DRAM setup is currently not supported.\n");
+	} else if (strap_type == SUNXI_DRAM_TYPE_LPDDR4) {
+		profile = &profile_lpddr4;
+		if (!try_dram_profile(profile, &config, &size))
+			panic("This DRAM setup is currently not supported.\n");
+	} else if (!try_dram_profile(profile, &config, &size)) {
 		profile = &profile_ddr3;
 		if (!try_dram_profile(profile, &config, &size))
 			panic("This DRAM setup is currently not supported.\n");
