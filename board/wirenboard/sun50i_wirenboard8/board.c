@@ -77,10 +77,10 @@
 
 #define WB8_LRADC_DDR3_MIN		0
 #define WB8_LRADC_DDR3_MAX		8
-#define WB8_LRADC_OTHER_MIN		17
-#define WB8_LRADC_OTHER_MAX		25
-#define WB8_LRADC_LPDDR4_MIN		28
-#define WB8_LRADC_LPDDR4_MAX		36
+#define WB8_LRADC_OTHER_MIN		24
+#define WB8_LRADC_OTHER_MAX		32
+#define WB8_LRADC_LPDDR4_MIN		38
+#define WB8_LRADC_LPDDR4_MAX		46
 #define WB8_LRADC_LPDDR4X_MIN		56
 #define WB8_LRADC_LPDDR4X_MAX		63
 
@@ -97,12 +97,9 @@ enum wb8_dram_strap {
 	WB8_DRAM_STRAP_OTHER,
 };
 
-static enum wb8_dram_strap wb8_dram_strap = WB8_DRAM_STRAP_UNREAD;
-static unsigned int wb8_dram_strap_raw;
-
-static const char *wb8_dram_strap_name(void)
+static const char *wb8_dram_strap_name(enum wb8_dram_strap strap)
 {
-	switch (wb8_dram_strap) {
+	switch (strap) {
 	case WB8_DRAM_STRAP_DDR3:
 		return "DDR3";
 	case WB8_DRAM_STRAP_LPDDR4:
@@ -116,12 +113,28 @@ static const char *wb8_dram_strap_name(void)
 	}
 }
 
+static const char *wb8_dram_strap_resistors(enum wb8_dram_strap strap)
+{
+	switch (strap) {
+	case WB8_DRAM_STRAP_DDR3:
+		return "R89=open R90=100K";
+	case WB8_DRAM_STRAP_LPDDR4:
+		return "R89=100K R90=100K";
+	case WB8_DRAM_STRAP_LPDDR4X:
+		return "R89=100K R90=open";
+	case WB8_DRAM_STRAP_OTHER:
+		return "R89=200K R90=100K";
+	default:
+		return "unknown";
+	}
+}
+
 static void wb8_lradc_init(void)
 {
 	u32 reg;
 
-	setbits_le32((void *)WB8_KEYADC_BGR_REG, WB8_KEYADC_RESET);
-	setbits_le32((void *)WB8_KEYADC_BGR_REG, WB8_KEYADC_GATE);
+	setbits_le32((void *)WB8_KEYADC_BGR_REG,
+		     WB8_KEYADC_RESET | WB8_KEYADC_GATE);
 	udelay(10);
 
 	reg = readl((void *)WB8_LRADC_CTRL);
@@ -155,73 +168,73 @@ static int wb8_lradc_read_raw(unsigned int *raw)
 	return -ETIMEDOUT;
 }
 
-static void wb8_dram_detect_strap(void)
+static enum wb8_dram_strap wb8_dram_detect_strap(void)
 {
-	if (wb8_dram_strap != WB8_DRAM_STRAP_UNREAD)
-		return;
+	enum wb8_dram_strap strap;
+	unsigned int raw;
 
-	if (wb8_lradc_read_raw(&wb8_dram_strap_raw)) {
-		wb8_dram_strap = WB8_DRAM_STRAP_LPDDR4;
+	if (wb8_lradc_read_raw(&raw)) {
 		printf("DRAM strap: failed to read LRADC, defaulting to LPDDR4\n");
-		return;
+		return WB8_DRAM_STRAP_LPDDR4;
 	}
 
-	if (wb8_dram_strap_raw >= WB8_LRADC_DDR3_MIN &&
-	    wb8_dram_strap_raw <= WB8_LRADC_DDR3_MAX) {
-		wb8_dram_strap = WB8_DRAM_STRAP_DDR3;
-	} else if (wb8_dram_strap_raw >= WB8_LRADC_OTHER_MIN &&
-		   wb8_dram_strap_raw <= WB8_LRADC_OTHER_MAX) {
-		wb8_dram_strap = WB8_DRAM_STRAP_OTHER;
-	} else if (wb8_dram_strap_raw >= WB8_LRADC_LPDDR4_MIN &&
-		   wb8_dram_strap_raw <= WB8_LRADC_LPDDR4_MAX) {
-		wb8_dram_strap = WB8_DRAM_STRAP_LPDDR4;
-	} else if (wb8_dram_strap_raw >= WB8_LRADC_LPDDR4X_MIN &&
-		   wb8_dram_strap_raw <= WB8_LRADC_LPDDR4X_MAX) {
-		wb8_dram_strap = WB8_DRAM_STRAP_LPDDR4X;
+	if (raw >= WB8_LRADC_DDR3_MIN &&
+	    raw <= WB8_LRADC_DDR3_MAX) {
+		strap = WB8_DRAM_STRAP_DDR3;
+	} else if (raw >= WB8_LRADC_OTHER_MIN &&
+		   raw <= WB8_LRADC_OTHER_MAX) {
+		strap = WB8_DRAM_STRAP_OTHER;
+	} else if (raw >= WB8_LRADC_LPDDR4_MIN &&
+		   raw <= WB8_LRADC_LPDDR4_MAX) {
+		strap = WB8_DRAM_STRAP_LPDDR4;
+	} else if (raw >= WB8_LRADC_LPDDR4X_MIN &&
+		   raw <= WB8_LRADC_LPDDR4X_MAX) {
+		strap = WB8_DRAM_STRAP_LPDDR4X;
 	} else {
-		wb8_dram_strap = WB8_DRAM_STRAP_UNKNOWN;
 		printf("DRAM strap: LRADC raw=%u is in a dead zone\n",
-		       wb8_dram_strap_raw);
+		       raw);
 		panic("DRAM strap is not recognized.\n");
 	}
 
-	printf("DRAM strap: LRADC raw=%u -> %s\n", wb8_dram_strap_raw,
-	       wb8_dram_strap_name());
+	printf("DRAM strap: LRADC raw=%u -> %s (%s)\n", raw,
+	       wb8_dram_strap_name(strap), wb8_dram_strap_resistors(strap));
 
-	if (wb8_dram_strap == WB8_DRAM_STRAP_OTHER)
+	if (strap == WB8_DRAM_STRAP_OTHER)
 		panic("DRAM strap is recognized but unsupported.\n");
+
+	return strap;
 }
 
-int sunxi_dram_prepare_type(enum sunxi_dram_type type)
+int sunxi_dram_prepare_type(enum sunxi_dram_type *type)
 {
+	enum wb8_dram_strap strap;
 	unsigned int mvolt;
 
-	wb8_dram_detect_strap();
+	strap = wb8_dram_detect_strap();
 
 	/*
-	 * DCDC5 is the DRAM rail. The strap selects the only profile that may
-	 * be tried; rejected profiles are not probed at the wrong voltage.
+	 * DCDC5 is the DRAM rail. Select both the voltage and the only DRAM
+	 * profile to probe from the soldered resistor strap.
 	 */
-	switch (type) {
-	case SUNXI_DRAM_TYPE_LPDDR4:
-		if (wb8_dram_strap == WB8_DRAM_STRAP_DDR3)
-			return -EOPNOTSUPP;
-		if (wb8_dram_strap == WB8_DRAM_STRAP_LPDDR4X)
-			mvolt = WB8_DRAM_LPDDR4X_DCDC5_MV;
-		else
-			mvolt = WB8_DRAM_LPDDR4_DCDC5_MV;
-		break;
-	case SUNXI_DRAM_TYPE_DDR3:
-		if (wb8_dram_strap != WB8_DRAM_STRAP_DDR3)
-			return -EOPNOTSUPP;
+	switch (strap) {
+	case WB8_DRAM_STRAP_DDR3:
+		*type = SUNXI_DRAM_TYPE_DDR3;
 		mvolt = WB8_DRAM_DDR3_DCDC5_MV;
+		break;
+	case WB8_DRAM_STRAP_LPDDR4:
+		*type = SUNXI_DRAM_TYPE_LPDDR4;
+		mvolt = WB8_DRAM_LPDDR4_DCDC5_MV;
+		break;
+	case WB8_DRAM_STRAP_LPDDR4X:
+		*type = SUNXI_DRAM_TYPE_LPDDR4;
+		mvolt = WB8_DRAM_LPDDR4X_DCDC5_MV;
 		break;
 	default:
 		return -EINVAL;
 	}
 
 	printf("DRAM power: DCDC5=%umV for %s probe\n", mvolt,
-	       type == SUNXI_DRAM_TYPE_DDR3 ? "DDR3" : "LPDDR4");
+	       *type == SUNXI_DRAM_TYPE_DDR3 ? "DDR3" : "LPDDR4");
 
 	return axp_set_dcdc5(mvolt);
 }
@@ -760,7 +773,6 @@ void sunxi_board_init(void)
 
 #ifdef CONFIG_AXP_DCDC1_VOLT
 	power_failed |= axp_set_dcdc1(CONFIG_AXP_DCDC1_VOLT);
-	power_failed |= axp_set_dcdc5(CONFIG_AXP_DCDC5_VOLT);
 #endif
 #ifdef CONFIG_AXP_DCDC2_VOLT
 	power_failed |= axp_set_dcdc2(CONFIG_AXP_DCDC2_VOLT);
@@ -808,7 +820,6 @@ void sunxi_board_init(void)
 #endif
 #endif	/* CONFIG_AXPxxx_POWER */
 	gd->ram_size = sunxi_dram_init();
-	printf(" %d MiB\n", (int)(gd->ram_size >> 20));
 	if (!gd->ram_size)
 		hang();
 
