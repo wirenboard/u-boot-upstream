@@ -70,6 +70,7 @@
 #define WB8_LRADC_PENDING_MASK		0x1f1f
 #define WB8_LRADC_DATA_PENDING		BIT(0)
 #define WB8_LRADC_RAW_MASK		0x3f
+#define WB8_LRADC_SAMPLE_TIMEOUT_MS	200
 
 #define WB8_KEYADC_BGR_REG		(SUNXI_CCM_BASE + 0x0a9c)
 #define WB8_KEYADC_GATE			BIT(0)
@@ -152,7 +153,7 @@ static int wb8_lradc_read_raw(unsigned int *raw)
 
 	wb8_lradc_init();
 
-	for (timeout = 0; timeout < 200; timeout++) {
+	for (timeout = 0; timeout < WB8_LRADC_SAMPLE_TIMEOUT_MS; timeout++) {
 		u32 ints = readl((void *)WB8_LRADC_INTS);
 
 		if (ints & WB8_LRADC_DATA_PENDING) {
