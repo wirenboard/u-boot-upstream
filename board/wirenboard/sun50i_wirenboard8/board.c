@@ -76,14 +76,18 @@
 #define WB8_KEYADC_GATE			BIT(0)
 #define WB8_KEYADC_RESET		BIT(16)
 
-#define WB8_LRADC_DDR3_MIN		0
-#define WB8_LRADC_DDR3_MAX		8
-#define WB8_LRADC_OTHER_MIN		24
-#define WB8_LRADC_OTHER_MAX		32
-#define WB8_LRADC_LPDDR4_MIN		38
-#define WB8_LRADC_LPDDR4_MAX		46
-#define WB8_LRADC_LPDDR4X_MIN		56
-#define WB8_LRADC_LPDDR4X_MAX		63
+/*
+ * These ranges are 6-bit raw ADC codes read from LRADC_DATA0 after applying
+ * WB8_LRADC_RAW_MASK. They are not physical voltages.
+ */
+#define WB8_LRADC_DDR3_RAW_MIN		0
+#define WB8_LRADC_DDR3_RAW_MAX		8
+#define WB8_LRADC_OTHER_RAW_MIN		24
+#define WB8_LRADC_OTHER_RAW_MAX		32
+#define WB8_LRADC_LPDDR4_RAW_MIN	38
+#define WB8_LRADC_LPDDR4_RAW_MAX	46
+#define WB8_LRADC_LPDDR4X_RAW_MIN	56
+#define WB8_LRADC_LPDDR4X_RAW_MAX	63
 
 #define WB8_DRAM_LPDDR4_DCDC5_MV	CONFIG_AXP_DCDC5_VOLT
 #define WB8_DRAM_LPDDR4X_DCDC5_MV	CONFIG_AXP_DCDC5_VOLT
@@ -179,17 +183,17 @@ static enum wb8_dram_strap wb8_dram_detect_strap(void)
 		return WB8_DRAM_STRAP_LPDDR4;
 	}
 
-	if (raw >= WB8_LRADC_DDR3_MIN &&
-	    raw <= WB8_LRADC_DDR3_MAX) {
+	if (raw >= WB8_LRADC_DDR3_RAW_MIN &&
+	    raw <= WB8_LRADC_DDR3_RAW_MAX) {
 		strap = WB8_DRAM_STRAP_DDR3;
-	} else if (raw >= WB8_LRADC_OTHER_MIN &&
-		   raw <= WB8_LRADC_OTHER_MAX) {
+	} else if (raw >= WB8_LRADC_OTHER_RAW_MIN &&
+		   raw <= WB8_LRADC_OTHER_RAW_MAX) {
 		strap = WB8_DRAM_STRAP_OTHER;
-	} else if (raw >= WB8_LRADC_LPDDR4_MIN &&
-		   raw <= WB8_LRADC_LPDDR4_MAX) {
+	} else if (raw >= WB8_LRADC_LPDDR4_RAW_MIN &&
+		   raw <= WB8_LRADC_LPDDR4_RAW_MAX) {
 		strap = WB8_DRAM_STRAP_LPDDR4;
-	} else if (raw >= WB8_LRADC_LPDDR4X_MIN &&
-		   raw <= WB8_LRADC_LPDDR4X_MAX) {
+	} else if (raw >= WB8_LRADC_LPDDR4X_RAW_MIN &&
+		   raw <= WB8_LRADC_LPDDR4X_RAW_MAX) {
 		strap = WB8_DRAM_STRAP_LPDDR4X;
 	} else {
 		printf("DRAM strap: LRADC raw=%u is in a dead zone\n",
