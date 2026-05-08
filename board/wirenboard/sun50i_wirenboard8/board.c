@@ -234,7 +234,7 @@ int sunxi_dram_prepare_type(enum sunxi_dram_type *type)
 	}
 
 	printf("DRAM power: DCDC5=%umV for %s probe\n", mvolt,
-	       *type == SUNXI_DRAM_TYPE_DDR3 ? "DDR3" : "LPDDR4");
+	       wb8_dram_strap_name(strap));
 
 	return axp_set_dcdc5(mvolt);
 }
