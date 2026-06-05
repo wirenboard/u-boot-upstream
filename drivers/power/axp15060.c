@@ -108,7 +108,7 @@ int axp_set_dcdc5(unsigned int mvolt)
 	u8 cfg = axp15060_mvolt_to_cfg(mvolt, 800, 1840, 10);
 
 	if (cfg >= 32)
-		cfg = 32 + (cfg - 32) * 2;
+		cfg = 32 + (cfg - 32) / 2;
 
 	if (mvolt == 0)
 		return pmic_bus_clrbits(AXP15060_OUTPUT_CTRL1,
