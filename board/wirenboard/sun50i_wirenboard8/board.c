@@ -40,6 +40,7 @@
 #include <linux/delay.h>
 #include <linux/errno.h>
 #include <linux/printk.h>
+#include <linux/sizes.h>
 #include <linux/types.h>
 #ifndef CONFIG_ARM64
 #include <asm/armv7.h>
@@ -969,12 +970,43 @@ static void setup_environment(const void *fdt)
 	}
 }
 
+/*
+ * The default arm64 sunxi MEM_LAYOUT places fdt/overlay/ramdisk at
+ * ~0x4FA00000+, which only fits boards with >=512 MB DRAM. On smaller WB8
+ * variants those addresses do not work:
+ *   - 128 MB: they are beyond the RAM top (0x48000000) -> fs LMB refuses the
+ *     load with "** Reading file would overwrite reserved memory **";
+ *   - 256 MB: they fall inside u-boot's ~84 MB top-of-RAM reservation
+ *     (which reaches down to ~0x4AF3CCF0) -> the dtb gets clobbered and
+ *     fdt_check_header() reports FDT_ERR_BADMAGIC.
+ * Re-pack the load addresses into the low window: above the relocated kernel
+ * (~0x40200000 + ~35 MB) and well below the reservation. The same window is
+ * valid for both 128 MB and 256 MB. Boards with >=512 MB keep the stock
+ * layout untouched, preserving its large headroom for kernel growth.
+ * fdt_addr_r is the address that drives the boot: loadfdt loads there and
+ * makes it the working FDT, which booti picks up via the empty ${fdtaddr} arg.
+ */
+static void wb8_fixup_load_addrs_for_small_dram(void)
+{
+	if (gd->ram_size > SZ_256M)
+		return;
+
+	env_set("fdt_addr_r",        "0x42400000");
+	env_set("scriptaddr",        "0x42A00000");
+	env_set("pxefile_addr_r",    "0x42B00000");
+	env_set("ramdisk_addr_r",    "0x42C00000");
+	env_set("fdtoverlay_addr_r", "0x42E00000");
+}
+
 int misc_init_r(void)
 {
 	const char *spl_dt_name;
 
 	env_set("fel_booted", NULL);
 	env_set("fel_scriptaddr", NULL);
+
+	/* Constrain load addresses on 256 MB DRAM board variants. */
+	wb8_fixup_load_addrs_for_small_dram();
 
 	/* Set fdtfile to match the FIT configuration chosen in SPL. */
 	spl_dt_name = get_spl_dt_name();
