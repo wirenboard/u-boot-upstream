@@ -21,7 +21,15 @@ enum sunxi_dram_type {
 	SUNXI_DRAM_TYPE_DDR3 = 3,
 	SUNXI_DRAM_TYPE_DDR4,
 	SUNXI_DRAM_TYPE_LPDDR3 = 7,
-	SUNXI_DRAM_TYPE_LPDDR4
+	SUNXI_DRAM_TYPE_LPDDR4,
+	/*
+	 * WB-specific: KOWIN LPDDR4X run in LPDDR4 mode at VDDQ=1.1V.
+	 * Used ONLY as a board strap / profile-selection key in
+	 * sunxi_dram_init(); the selected profile keeps .para.type =
+	 * SUNXI_DRAM_TYPE_LPDDR4, so every init path runs as plain LPDDR4
+	 * and this value never reaches the controller.
+	 */
+	SUNXI_DRAM_TYPE_LPDDR4X
 };
 
 /* MBUS part is largely the same as in H6, except for one special register */
@@ -159,6 +167,10 @@ struct dram_para {
 	u32 tpr10;
 	u32 tpr11;
 	u32 tpr12;
+	/* LPDDR4 only: MR14 (write VREF-DQ) OP value, and DQ pull-up driver
+	 * impedance written to PHY+0x38c (per-byte). Ignored for other types. */
+	u32 mr14;
+	u32 dx_dri_hi;
 };
 
 struct dram_config {
