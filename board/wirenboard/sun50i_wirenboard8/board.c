@@ -171,7 +171,18 @@ static int wb8_lradc_read_raw(unsigned int *raw)
 		udelay(1000);
 	}
 
-	return -ETIMEDOUT;
+	/*
+	 * The LRADC runs in keypad mode (HOLD_EN): the data-pending IRQ is
+	 * only raised when the input is pulled below the rail, like a pressed
+	 * key. The LPDDR4X strap (R90 open) leaves the input at ~AVCC, which
+	 * the keypad logic treats as "idle" and never flags as pending — yet
+	 * the conversion result is still latched in DATA0. The loop above has
+	 * given it ample time to settle, so read DATA0 directly as a fallback
+	 * (verified: raw=0x3f for the LPDDR4X strap). An out-of-range value
+	 * is still caught by the dead-zone check in the caller.
+	 */
+	*raw = readl((void *)WB8_LRADC_DATA0) & WB8_LRADC_RAW_MASK;
+	return 0;
 }
 
 static enum wb8_dram_strap wb8_dram_detect_strap(void)
@@ -232,7 +243,7 @@ int sunxi_dram_prepare_type(enum sunxi_dram_type *type)
 		mvolt = WB8_DRAM_LPDDR4_DCDC5_MV;
 		break;
 	case WB8_DRAM_STRAP_LPDDR4X:
-		*type = SUNXI_DRAM_TYPE_LPDDR4;
+		*type = SUNXI_DRAM_TYPE_LPDDR4X;
 		mvolt = WB8_DRAM_LPDDR4X_DCDC5_MV;
 		break;
 	default:

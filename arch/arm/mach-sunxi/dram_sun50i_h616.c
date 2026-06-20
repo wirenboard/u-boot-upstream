@@ -299,7 +299,7 @@ static void mctl_phy_configure_odt(const struct dram_para *para)
 	}
 
 	val_lo = para->dx_dri;
-	val_hi = (para->type == SUNXI_DRAM_TYPE_LPDDR4) ? 0x04040404 : para->dx_dri;
+	val_hi = (para->type == SUNXI_DRAM_TYPE_LPDDR4) ? para->dx_dri_hi : para->dx_dri;
 	writel_relaxed(MASK_BYTE(val_lo, 0), SUNXI_DRAM_PHY0_BASE + 0x388);
 	writel_relaxed(MASK_BYTE(val_hi, 0), SUNXI_DRAM_PHY0_BASE + 0x38c);
 	writel_relaxed(MASK_BYTE(val_lo, 1), SUNXI_DRAM_PHY0_BASE + 0x3c8);
@@ -1155,7 +1155,7 @@ static bool mctl_phy_init(const struct dram_para *para,
 		udelay(10);
 		mctl_await_completion(&mctl_ctl->mrctrl0, BIT(31), 0);
 
-		writel(0xe09, &mctl_ctl->mrctrl1);
+		writel(0xe00 | (para->mr14 & 0xff), &mctl_ctl->mrctrl1);
 		udelay(10);
 		writel(0x80000030, &mctl_ctl->mrctrl0);
 		udelay(10);
@@ -1354,6 +1354,7 @@ static const struct dram_runtime_profile profile_lpddr4 = {
 		.type = SUNXI_DRAM_TYPE_LPDDR4,
 		.dx_odt = 0x07070707,
 		.dx_dri = 0x0e0e0e0e,
+		.dx_dri_hi = 0x04040404,	/* DQ pull-up, was hardcoded */
 		.ca_dri = 0x0e0e,
 		.odt_en = 0xaaaaeeee,
 		.tpr0 = 0x0,
@@ -1362,6 +1363,34 @@ static const struct dram_runtime_profile profile_lpddr4 = {
 		.tpr10 = 0x402f6633,
 		.tpr11 = 0x24242624,
 		.tpr12 = 0x0f0f100f,
+		.mr14 = 0x09,			/* MR14, was hardcoded 0xe09 */
+	},
+};
+
+/*
+ * KOWIN LPDDR4X 16Gb run as LPDDR4 at VDDQ=1.1V (out-of-spec crutch).
+ * Validated parameter set (V2), 2026-05/06 (DST eye-scan over -40..+95 C,
+ * write-VREF wall ~30 codes away, hot-retention >=8x margin). NORMAL LPDDR4
+ * does NOT work on these — selected only on the dedicated LPDDR4X strap.
+ * .type stays LPDDR4 (electrical mode); selection key is the strap.
+ */
+static const struct dram_runtime_profile profile_lpddr4x_16gb = {
+	.name = "LPDDR4X-16Gb",
+	.para = {
+		.clk = 792,
+		.type = SUNXI_DRAM_TYPE_LPDDR4,
+		.dx_odt = 0x07070707,
+		.dx_dri = 0x0e0e0e0e,
+		.dx_dri_hi = 0x09090909,	/* DQ pull-up 0x09 (vs 0x04 normal) */
+		.ca_dri = 0x0e0e,
+		.odt_en = 0xaaaaeeee,
+		.tpr0 = 0x0,
+		.tpr2 = 0x0,
+		.tpr6 = 0x50000000,
+		.tpr10 = 0x402f6633,
+		.tpr11 = 0x25272725,
+		.tpr12 = 0x0e0f0f0e,
+		.mr14 = 0x02,
 	},
 };
 
@@ -1454,6 +1483,15 @@ unsigned long sunxi_dram_init(void)
 			panic("This DRAM setup is currently not supported.\n");
 	} else if (strap_type == SUNXI_DRAM_TYPE_LPDDR4) {
 		profile = &profile_lpddr4;
+		if (!try_dram_profile(profile, &config, &size))
+			panic("This DRAM setup is currently not supported.\n");
+	} else if (strap_type == SUNXI_DRAM_TYPE_LPDDR4X) {
+		/*
+		 * KOWIN LPDDR4X 16Gb — dedicated tuned profile (LPDDR4 mode).
+		 * TODO 32Gb: branch here by detected geometry (ranks/size) once
+		 * that hardware exists; profile selection is the only difference.
+		 */
+		profile = &profile_lpddr4x_16gb;
 		if (!try_dram_profile(profile, &config, &size))
 			panic("This DRAM setup is currently not supported.\n");
 	} else if (!try_dram_profile(profile, &config, &size)) {
