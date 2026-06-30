@@ -36,6 +36,7 @@
 #include <asm/arch/pmic_bus.h>
 #include <asm/arch/spl.h>
 #include <asm/arch/sys_proto.h>
+#include <asm/arch/wb_dram_dst.h>
 #include <asm/global_data.h>
 #include <linux/delay.h>
 #include <linux/errno.h>
@@ -1147,6 +1148,36 @@ int ft_board_setup(void *blob, struct bd_info *bd)
 	offset = fdt_path_offset(blob, "/chosen");
 	if (offset >= 0)
 		fdt_setprop_string(blob, offset, "u-boot-version", version_string);
+
+	/*
+	 * Expose SPL DST eye-scan results under /chosen/wb-dram-dst, but only
+	 * when the fixed handoff slot is in usable DRAM below U-Boot's own
+	 * relocation. On small-DRAM boards (<=256 MB) that address is past the
+	 * RAM top or inside U-Boot's top reservation - skip it there.
+	 */
+	/* grow the FDT by 512 bytes - headroom for the wb-dram-dst node */
+	fdt_increase_size(blob, 512);
+	offset = fdt_path_offset(blob, "/chosen");
+	if (offset >= 0 &&
+	    WB_DRAM_DST_ADDR + sizeof(struct wb_dram_dst) <= gd->relocaddr) {
+		const struct wb_dram_dst *h =
+			(const struct wb_dram_dst *)WB_DRAM_DST_ADDR;
+
+		if (h->magic == WB_DRAM_DST_MAGIC) {
+			int node = fdt_add_subnode(blob, offset, "wb-dram-dst");
+
+			if (node >= 0) {
+				fdt_setprop_u32(blob, node, "tpr6", h->tpr6);
+				fdt_setprop_u32(blob, node, "tpr11", h->tpr11);
+				fdt_setprop_u32(blob, node, "tpr12", h->tpr12);
+				fdt_setprop_u32(blob, node, "mr14", h->mr14);
+				fdt_setprop_u32(blob, node, "read-eye-width", h->r_eye_width);
+				fdt_setprop_u32(blob, node, "write-eye-width", h->w_eye_width);
+				fdt_setprop_u32(blob, node, "clock-mhz", h->clk_mhz);
+				fdt_setprop_u32(blob, node, "size-mib", h->size_mib);
+			}
+		}
+	}
 
 	bluetooth_dt_fixup(blob);
 

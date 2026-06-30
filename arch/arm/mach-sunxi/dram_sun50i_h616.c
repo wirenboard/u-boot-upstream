@@ -12,6 +12,7 @@
  * (C) Copyright 2020 Jernej Skrabec <jernej.skrabec@siol.net>
  *
  */
+#include <cpu_func.h>
 #include <init.h>
 #include <log.h>
 #include <asm/io.h>
@@ -20,8 +21,10 @@
 #include <asm/arch/dram_dw_helpers.h>
 #include <asm/arch/cpu.h>
 #include <asm/arch/prcm.h>
+#include <asm/arch/wb_dram_dst.h>
 #include <linux/bitops.h>
 #include <linux/delay.h>
+#include <linux/sizes.h>
 
 enum {
 	MBUS_QOS_LOWEST = 0,
@@ -1459,12 +1462,545 @@ static bool try_dram_profile(const struct dram_runtime_profile *profile,
 	return *size != 0;
 }
 
+
+/*
+ * DST (DRAM Stability Test) - 2D eye-scan calibration.
+ *
+ * Ported from the vendor Allwinner boot0 (boot0_sdcard.elf, sun50iw9p1)
+ * dst_dq_eye_scan (32-bit ARM Thumb-2). A "2D eye" sweeps two axes - the data
+ * reference voltage (VREF) and the per-byte read/write delays - re-initing the
+ * PHY at each step and running a short memtest, to map the window in which
+ * data is sampled reliably; the center of the widest window (the "eye") gives
+ * the best voltage/timing margin. Phases: read VREF (tpr6) -> read delays
+ * (tpr12) -> write VREF (MR14) -> write delays (tpr11) -> read delays refined.
+ *
+ * Measurement only: the controller keeps running on the fixed profile values;
+ * the found optimum is just handed to Linux (see asm/arch/wb_dram_dst.h).
+ */
+
+/* Fill DRAM region with a constant 32-bit pattern */
+static void dst_memfill(volatile u32 *start, u32 count, u32 pattern)
+{
+	u32 i;
+
+	for (i = 0; i < count; i++)
+		start[i] = pattern;
+	dsb();
+}
+
+/* Copy DRAM region word-by-word */
+static void dst_memcopy(volatile u32 *dst, volatile u32 *src, u32 count)
+{
+	u32 i;
+
+	for (i = 0; i < count; i++)
+		dst[i] = src[i];
+	dsb();
+}
+
+/* Compare two DRAM regions, return 0 if match, non-zero bitmask on mismatch */
+static u32 dst_memcmp_region(volatile u32 *a, volatile u32 *b, u32 count)
+{
+	u32 i, diff = 0;
+
+	for (i = 0; i < count; i++)
+		diff |= a[i] ^ b[i];
+	return diff;
+}
+
+/*
+ * dst_read_cmp — write incrementing pattern to DRAM, read back, compare.
+ * Returns 0 if the specified byte lane reads correctly, non-zero on error.
+ *
+ * Vendor writes pattern[i] = i*0x01010101 + 0x01234567 to base,
+ * and pattern[i] XOR 0xfdb97531 to base+ref_offset, then reads back
+ * and checks per-byte-lane.
+ */
+static u32 dst_read_cmp(ulong base, ulong ref_offset, u32 count, int byte_lane)
+{
+	volatile u32 *p = (volatile u32 *)base;
+	volatile u32 *r = (volatile u32 *)(base + ref_offset);
+	u32 accum = 0;
+	u32 pat_p = 0xfedcba98;
+	u32 pat_r = 0x01234567;
+	u32 i;
+
+	/* Write patterns */
+	for (i = 0; i < count; i++) {
+		u32 key = i * 0x01010101;
+
+		p[i] = key + pat_p;
+		r[i] = key + pat_r;
+	}
+	dsb();
+
+	/* Read back and compare */
+	for (i = 0; i < count; i++) {
+		u32 key = i * 0x01010101;
+		u32 err_p = p[i] ^ (key + pat_p);
+		u32 err_r = r[i] ^ (key + pat_r);
+
+		accum |= err_p | err_r;
+	}
+
+	return (accum >> (byte_lane * 8)) & 0xff;
+}
+
+/*
+ * dst_memtester — memory test with multiple patterns.
+ *
+ * Writes patterns to a source region, copies through DRAM, compares.
+ * Tests 6 fixed patterns, then bit-walking patterns for the specified byte lane.
+ *
+ * @dram_half:   half of detected DRAM size (0 for default addresses)
+ * @test_len:    test region size in bytes
+ * @byte_lane:   byte lane to test (0-3), or 8 for full-word test
+ * @is_byte:     true = test specific byte lane only
+ * Returns 0 on success.
+ */
+static int dst_memtester(ulong dram_half, u32 test_len, int byte_lane,
+			 bool is_byte)
+{
+	static const u32 patterns[] = {
+		0x55555555, 0xAAAAAAAA, 0x33333333,
+		0xCCCCCCCC, 0x0F0F0F0F, 0xF0F0F0F0,
+	};
+	ulong dram_base = CFG_SYS_SDRAM_BASE;
+	volatile u32 *src, *dst_r, *ref;
+	u32 word_count = test_len / 4;
+	u32 diff;
+	int p, bit;
+
+	/* buffers at half of the detected DRAM (not always 2 GiB) */
+	ref   = (volatile u32 *)(dram_base + dram_half);           /* copy source */
+	dst_r = (volatile u32 *)(dram_base + dram_half + 0x08UL);  /* copy destination */
+	src   = (volatile u32 *)(dram_base + dram_half + 0x0cUL);  /* expected pattern */
+
+	/* Phase 1: fixed pattern tests */
+	for (p = 0; p < ARRAY_SIZE(patterns); p++) {
+		dst_memfill(src, word_count, patterns[p]);
+		dst_memfill(ref, word_count, patterns[p]);
+		dst_memcopy(dst_r, ref, word_count);
+		diff = dst_memcmp_region(src, dst_r, word_count);
+		if (diff) {
+			if (is_byte)
+				return 1;
+			if ((diff >> (byte_lane * 8)) & 0xff)
+				return 1;
+		}
+	}
+
+	/* Phase 2: bit-walking patterns */
+	if (!is_byte) {
+		int start_bit = byte_lane * 8;
+		int end_bit = start_bit + 8;
+
+		for (bit = start_bit; bit < end_bit; bit++) {
+			u32 pat = 1u << bit;
+			u32 ipat = ~pat;
+
+			/* Test with single bit set */
+			dst_memfill(src, word_count, pat);
+			dst_memfill(ref, word_count, pat);
+			dst_memcopy(dst_r, ref, word_count);
+			diff = dst_memcmp_region(src, dst_r, word_count);
+			if ((diff >> (byte_lane * 8)) & 0xff)
+				return 1;
+
+			/* Test with single bit clear */
+			dst_memfill(src, word_count, ipat);
+			dst_memfill(ref, word_count, ipat);
+			dst_memcopy(dst_r, ref, word_count);
+			diff = dst_memcmp_region(src, dst_r, word_count);
+			if ((diff >> (byte_lane * 8)) & 0xff)
+				return 1;
+		}
+	}
+
+	return 0;
+}
+
+/*
+ * Per-byte delay scan (1D).
+ *
+ * For each DQ byte lane, sweep delay 0..63, test memory,
+ * find the passing window, compute center delay.
+ *
+ * @para:     mutable dram_para
+ * @config:   dram config
+ * @is_write: true = scan write path (tpr11), false = read path (tpr12)
+ * @num_bytes: number of byte lanes (2 or 4)
+ * @dram_half: half of DRAM size for memtester addressing
+ * Returns the packed tpr11 or tpr12 value.
+ */
+static u32 dst_per_byte_scan(struct dram_para *para,
+			     const struct dram_config *config,
+			     bool is_write, int num_bytes, ulong dram_half)
+{
+	u32 result = 0;
+	u32 *tpr = is_write ? &para->tpr11 : &para->tpr12;
+	u32 saved_tpr11 = para->tpr11;
+	u32 saved_tpr12 = para->tpr12;
+	int bl;
+
+	for (bl = 0; bl < num_bytes; bl++) {
+		int shift = bl * 8;
+		u32 mask = ~(0x3fu << shift);
+		u32 saved_byte = (saved_tpr11 >> shift) & 0x3f;
+		int first_pass = -1, last_pass = -1;
+		int delay, eye_width, center;
+
+		/*
+		 * Init DRAM once with known-good params before sweep.
+		 */
+		para->tpr11 = saved_tpr11;
+		para->tpr12 = saved_tpr12;
+		mctl_core_init(para, config);
+
+		for (delay = 0; delay < 64; delay++) {
+			int pass;
+			u32 prev = *tpr;
+
+			*tpr = (prev & mask) | ((u32)delay << shift);
+			mctl_phy_bit_delay_compensation(para);
+
+			pass = (dst_read_cmp(
+				CFG_SYS_SDRAM_BASE,
+				dram_half + 0x0c, 256, bl) == 0);
+
+			if (pass) {
+				if (first_pass < 0)
+					first_pass = delay;
+				last_pass = delay;
+			}
+		}
+
+		eye_width = (first_pass >= 0) ? last_pass - first_pass + 1 : 0;
+		center = (first_pass >= 0) ?
+			 (first_pass + last_pass) / 2 : (int)saved_byte;
+
+		if (eye_width < 3)
+			result |= (saved_byte & 0x3f) << shift;
+		else
+			result |= ((u32)center & 0x3f) << shift;
+	}
+
+	if (is_write)
+		para->tpr11 = result;
+	else
+		para->tpr12 = result;
+	return result;
+}
+
+/*
+ * 2D Eye Scan: sweep VREF × delay.
+ *
+ * For read: sweeps PHY VREF (packed in tpr6) and read delay (tpr12).
+ * For write: sweeps DRAM VREF (MR14) and write delay (tpr11).
+ *
+ * Returns the optimal VREF value (to be packed into tpr6 or mr14).
+ */
+static int dst_2d_eye_scan(struct dram_para *para,
+			   const struct dram_config *config,
+			   bool is_write, int num_bytes,
+			   int vref_start, int vref_end, int vref_step,
+			   ulong dram_half, int *out_width)
+{
+	int best_vref = -1, best_width = 0;
+	int vref;
+	u8 row[64];
+
+	for (vref = vref_start; vref <= vref_end; vref += vref_step) {
+		int width = 0, first = -1, last = -1;
+		int cur_w, cur_f;
+		int delay;
+
+		if (is_write) {
+			/* Set DRAM write VREF via MR14 */
+			para->mr14 = vref;
+		} else {
+			/* Set PHY read VREF in tpr6 (LPDDR4 uses byte 3) */
+			switch (para->type) {
+			case SUNXI_DRAM_TYPE_DDR3:
+				para->tpr6 = (para->tpr6 & ~0xff) | (vref & 0xff);
+				break;
+			case SUNXI_DRAM_TYPE_LPDDR3:
+				para->tpr6 = (para->tpr6 & ~0xff00) |
+					     ((vref & 0xff) << 8);
+				break;
+			case SUNXI_DRAM_TYPE_LPDDR4:
+			default:
+				para->tpr6 = (para->tpr6 & ~0xff000000) |
+					     ((vref & 0xff) << 24);
+				break;
+			}
+		}
+
+		/* Reinit DRAM with new VREF */
+		if (!mctl_core_init(para, config)) {
+			/* Init failed — skip this VREF */
+			continue;
+		}
+
+		/* Sweep delay 0..63 */
+		for (delay = 0; delay < 64; delay++) {
+			u32 *tpr = is_write ? &para->tpr11 : &para->tpr12;
+			u32 saved = *tpr;
+
+			/* Set all byte lanes to same delay for 2D scan */
+			*tpr = delay * 0x01010101;
+			mctl_phy_bit_delay_compensation(para);
+
+			row[delay] = (dst_read_cmp(
+				CFG_SYS_SDRAM_BASE,
+				dram_half + 0x0c, 256, 0) == 0);
+
+			*tpr = saved;
+		}
+
+		/* Find longest run of passes in this row */
+		cur_w = 0;
+		cur_f = 0;
+		for (delay = 0; delay < 64; delay++) {
+			if (row[delay]) {
+				if (cur_w == 0)
+					cur_f = delay;
+				cur_w++;
+			} else {
+				if (cur_w > width) {
+					width = cur_w;
+					first = cur_f;
+					last = delay - 1;
+				}
+				cur_w = 0;
+			}
+		}
+		if (cur_w > width) {
+			width = cur_w;
+			first = cur_f;
+			last = 63;
+		}
+
+		if (width > best_width) {
+			best_width = width;
+			best_vref = vref;
+		}
+
+	}
+
+	if (out_width)
+		*out_width = best_width;
+	if (best_width < 4)
+		printf("[ERROR DST] %s 2D eye too narrow: %d\n",
+		       is_write ? "W" : "R", best_width);
+
+	return best_vref;
+}
+
+/*
+ * dst_dq_eye_scan — main DST entry point.
+ *
+ * Runs all calibration phases, updates para with optimal values.
+ * Returns 0 on success, -1 on failure.
+ */
+static int dst_dq_eye_scan(struct dram_para *para,
+			   struct dram_config *config,
+			   int *out_r_width, int *out_w_width)
+{
+	u32 orig_clk = para->clk;
+	u32 orig_tpr6 = para->tpr6;
+	u32 orig_tpr11 = para->tpr11;
+	u32 orig_tpr12 = para->tpr12;
+	u32 orig_odt_en = para->odt_en;
+	u32 orig_mr14 = para->mr14;
+	ulong dram_half;
+	int num_bytes;
+	bool has_vref_scan;
+	bool has_write_scan;
+	int opt_vref;
+	int r_width = 0, w_width = 0;
+
+	/*
+	 * Read VREF (tpr6) and the per-byte delay scans (tpr11/tpr12) apply to
+	 * every DRAM type. The write-VREF scan trains MR14, which only LPDDR4/
+	 * LPDDR4X have - keep it gated on the type so this stays safe if the
+	 * call-site gate is ever widened (DDR3/LPDDR3 have no MR14). The
+	 * original v2024.10 tpr13 VREF/WRITE_SCAN flags do not exist here.
+	 */
+	has_vref_scan = true;
+	has_write_scan = (para->type == SUNXI_DRAM_TYPE_LPDDR4);
+
+	/*
+	 * Phase 0: Preparation — detect rank/width/size, verify basic
+	 * memory operation with original parameters.
+	 */
+	mctl_auto_detect_rank_width(para, config);
+	mctl_auto_detect_dram_size(para, config);
+	dram_half = mctl_calc_size(config) >> 1;
+	num_bytes = config->bus_full_width ? 4 : 2;
+
+	/* Reinit at full config to verify basic operation */
+	if (!mctl_core_init(para, config)) {
+		printf("[ERROR DST] Init failed\n");
+		goto fail;
+	}
+
+	if (dst_memtester(dram_half, 0x8000, 8, true)) {
+		printf("[ERROR DST] Initial memtest fail\n");
+		goto fail;
+	}
+
+	/*
+	 * Phase 1: Read 2D Eye Scan — find optimal PHY VREF (tpr6).
+	 */
+	if (has_vref_scan) {
+		int vref_start, vref_end, vref_step;
+
+		/* VREF sweep range depends on DRAM type */
+		switch (para->type) {
+		case SUNXI_DRAM_TYPE_LPDDR4:
+			vref_start = 0x10;
+			vref_end = 0x60;
+			vref_step = 4;
+			break;
+		case SUNXI_DRAM_TYPE_LPDDR3:
+			vref_start = 0x10;
+			vref_end = 0x60;
+			vref_step = 4;
+			break;
+		default: /* DDR3/DDR4 */
+			vref_start = 0x10;
+			vref_end = 0x60;
+			vref_step = 4;
+			break;
+		}
+
+		opt_vref = dst_2d_eye_scan(para, config, false, num_bytes,
+					   vref_start, vref_end, vref_step,
+					   dram_half, &r_width);
+		if (opt_vref < 0) {
+			printf("[ERROR DST] Read 2D scan failed\n");
+			goto fail;
+		}
+
+		/* Apply optimal VREF to tpr6 */
+		switch (para->type) {
+		case SUNXI_DRAM_TYPE_DDR3:
+			para->tpr6 = (para->tpr6 & ~0xff) | opt_vref;
+			break;
+		case SUNXI_DRAM_TYPE_LPDDR3:
+			para->tpr6 = (para->tpr6 & ~0xff00) |
+				     (opt_vref << 8);
+			break;
+		case SUNXI_DRAM_TYPE_LPDDR4:
+		default:
+			para->tpr6 = (para->tpr6 & ~0xff000000) |
+				     (opt_vref << 24);
+			break;
+		}
+	}
+
+	/* Reinit with optimal VREF before per-byte scan */
+	if (!mctl_core_init(para, config)) {
+		printf("[ERROR DST] Dram Init Fail!\n");
+		goto fail;
+	}
+
+	/*
+	 * Phase 2: Read 1st Pass — per-byte read delay scan → tpr12.
+	 */
+	para->tpr12 = dst_per_byte_scan(para, config, false, num_bytes,
+					dram_half);
+
+	/*
+	 * Phase 3: Write 2D Eye Scan — find optimal DRAM write VREF (MR14).
+	 */
+	if (has_write_scan) {
+		int vref_start_w, vref_end_w, vref_step_w;
+
+		switch (para->type) {
+		case SUNXI_DRAM_TYPE_LPDDR4:
+			vref_start_w = 0;
+			vref_end_w = 50;
+			vref_step_w = 2;
+			break;
+		default:
+			vref_start_w = 0;
+			vref_end_w = 50;
+			vref_step_w = 2;
+			break;
+		}
+
+		opt_vref = dst_2d_eye_scan(para, config, true, num_bytes,
+					   vref_start_w, vref_end_w,
+					   vref_step_w, dram_half, &w_width);
+		if (opt_vref >= 0) {
+			para->mr14 = opt_vref;
+		} else {
+			printf("[ERROR DST] Write 2D scan failed\n");
+			para->mr14 = orig_mr14;
+		}
+	}
+
+	/* Reinit with found MR14 */
+	if (!mctl_core_init(para, config)) {
+		printf("[ERROR DST] Dram Init Fail!\n");
+		goto fail;
+	}
+
+	/*
+	 * Phase 4: Write 2nd Pass — per-byte write delay scan → tpr11.
+	 */
+	para->tpr11 = dst_per_byte_scan(para, config, true, num_bytes,
+					dram_half);
+
+	/*
+	 * Phase 5: Read 2nd Pass — refine tpr12 with new tpr11.
+	 */
+	para->tpr12 = dst_per_byte_scan(para, config, false, num_bytes,
+					dram_half);
+
+	/* Final reinit with all optimal parameters */
+	if (!mctl_core_init(para, config)) {
+		printf("[ERROR DST] Final init failed\n");
+		goto fail;
+	}
+
+	/* Final stability check */
+	if (dst_memtester(dram_half, 0x8000, 8, true)) {
+		printf("[ERROR DST] Stable Memtest Fail\n");
+		goto fail;
+	}
+
+	if (out_r_width)
+		*out_r_width = r_width;
+	if (out_w_width)
+		*out_w_width = w_width;
+
+	printf("[DST] tpr6=0x%08x tpr11=0x%08x tpr12=0x%08x mr14=0x%02x R=%d W=%d\n",
+	       para->tpr6, para->tpr11, para->tpr12, para->mr14,
+	       r_width, w_width);
+	return 0;
+
+fail:
+	para->clk = orig_clk;
+	para->tpr6 = orig_tpr6;
+	para->tpr11 = orig_tpr11;
+	para->tpr12 = orig_tpr12;
+	para->odt_en = orig_odt_en;
+	para->mr14 = orig_mr14;
+	printf("[ERROR DST] Dram DST Fail\n");
+	return -1;
+}
+
+
 unsigned long sunxi_dram_init(void)
 {
 	struct sunxi_prcm_reg *const prcm =
 		(struct sunxi_prcm_reg *)SUNXI_PRCM_BASE;
 	struct dram_config config;
 	unsigned long size;
+	bool dst_slot_ok;
 	const struct dram_runtime_profile *profile = &profile_lpddr4;
 	enum sunxi_dram_type strap_type = 0;
 	const char *type;
@@ -1498,6 +2034,78 @@ unsigned long sunxi_dram_init(void)
 		profile = &profile_ddr3;
 		if (!try_dram_profile(profile, &config, &size))
 			panic("This DRAM setup is currently not supported.\n");
+	}
+
+	/*
+	 * Memory characterisation (statistics only) for LPDDR4-class DRAM.
+	 * Gated on the electrical type, so it covers both the LPDDR4 and the
+	 * tuned LPDDR4X profiles at any density without changes here. DDR3/
+	 * LPDDR3 boards have no host write-VREF (MR14) and skip this entirely;
+	 * they boot normally.
+	 *
+	 * Invalidate the handoff slot up front: the magic is written only when
+	 * the DST eye-scan runs and succeeds, so any other case - a non-LPDDR4
+	 * board or a failed scan - leaves it cleared and ft_board_setup() finds
+	 * no stash.
+	 *
+	 * Run the DST 2D eye-scan on a *copy* of the parameters: DST re-inits
+	 * the controller at the swept/found values to measure, so afterwards
+	 * re-init on the fixed profile values and keep operating on those.
+	 *
+	 * The slot sits at a fixed 224 MB offset; it is only within usable DRAM
+	 * and below U-Boot's top-of-RAM reservation on boards with >= 512 MB.
+	 * Smaller boards skip the handoff entirely - this matches the read-side
+	 * check against gd->relocaddr in ft_board_setup (never write a slot that
+	 * U-Boot proper would not read), and on the 128 MB variant the address
+	 * is past the RAM top, where a write would alias into live DRAM.
+	 */
+	dst_slot_ok = size >= SZ_512M;
+
+	if (dst_slot_ok) {
+		((struct wb_dram_dst *)WB_DRAM_DST_ADDR)->magic = 0;
+		flush_dcache_range(WB_DRAM_DST_ADDR,
+				   WB_DRAM_DST_ADDR + sizeof(struct wb_dram_dst));
+	}
+
+	if (profile->para.type == SUNXI_DRAM_TYPE_LPDDR4) {
+		struct dram_para dst_para = profile->para;
+		int r_width = 0, w_width = 0;
+		int dst_ok;
+
+		dst_ok = dst_dq_eye_scan(&dst_para, &config,
+					 &r_width, &w_width);
+
+		/*
+		 * DST left the controller on the swept values; re-init on the
+		 * fixed profile values and keep operating on those. This is
+		 * the last DRAM controller init, so the handoff is stashed
+		 * only afterwards.
+		 */
+		if (!mctl_core_init(&profile->para, &config))
+			panic("DRAM re-init after DST failed\n");
+
+		/*
+		 * Stash the measured eye parameters at a fixed DRAM address;
+		 * U-Boot proper picks them up in ft_board_setup() and exposes
+		 * them under /chosen/wb-dram-dst for Linux (WB6-style handoff).
+		 */
+		if (dst_ok == 0 && dst_slot_ok) {
+			struct wb_dram_dst *h =
+				(struct wb_dram_dst *)WB_DRAM_DST_ADDR;
+
+			h->magic = WB_DRAM_DST_MAGIC;
+			h->tpr6 = dst_para.tpr6;
+			h->tpr11 = dst_para.tpr11;
+			h->tpr12 = dst_para.tpr12;
+			h->mr14 = dst_para.mr14;
+			h->r_eye_width = r_width;
+			h->w_eye_width = w_width;
+			h->clk_mhz = profile->para.clk;
+			h->size_mib = size >> 20;
+			flush_dcache_range(WB_DRAM_DST_ADDR,
+					   WB_DRAM_DST_ADDR +
+					   sizeof(struct wb_dram_dst));
+		}
 	}
 
 	type = dram_type_name(profile->para.type);
